@@ -15,13 +15,17 @@ import re
 Jobinfo=[] #初始化作业列表
 JobDic={}  #作业字典表
 Flow={} #统计一共多少个不同的flow，用于抓取scanEXIT
-JobInterval=2 #查找JobInterval分钟之前被修改过的日志，单位分钟
-ScanInterval=30#扫描时间间隔单位秒
+JobInterval=1#扫描N分钟之前的作业
+ScanInterval=10#扫描时间间隔单位秒
 ProgInterval=0#单位分钟
 check_time=datetime.datetime.now()+datetime.timedelta(minutes=ProgInterval) #初始化check_time,对check_time直接加两个小时
 StartTime=datetime.datetime.now().strftime("%m%d%H%M%S")
+EDW_HOME=os.environ['EDW_HOME'] #获取系统
+CHECKDATA_DIR=EDW_HOME+'/CHECKDATA/' #程序所在路径
+Tmp_Dir=EDW_HOME+'/tmp/' #临时文件存在路径
+mysqldb='50.16.0.102' #生产
+#mysqldb='192.168.3.41'  #测试
 ###########################################
-
 if len(sys.argv)<2:
     print("不给跑批日期参数跑个屁啊！")
     sys.exit(1)
@@ -29,17 +33,17 @@ BizData=sys.argv[1]
 ###########################################
 ########作业信息初始化流程、模块、作业#######
 def InitJob():
-    (stats,output)= commands.getstatusoutput("sh /BIG_DATA/EDW/ZYXF_EDW/PYTHON_APP/tmp/yangdl/etl_log.sh") 
+    (stats,output)= commands.getstatusoutput("sh "+CHECKDATA_DIR+"etl_log.sh") 
     global Jobinfo
     global JobDic
     FlowNameCN=''
     ModuleCN=''
     FlowNameID=''
-    fil=open('/BIG_DATA/EDW/ZYXF_EDW/PYTHON_APP/tmp/TaskctlJobDic.txt','w')
+    fil=open(Tmp_Dir+'TaskctlJobDic.txt','w')
     output=output.decode('gbk').encode('utf-8')
     fil.write(output)
     fil.close()
-    fil=open('/BIG_DATA/EDW/ZYXF_EDW/PYTHON_APP/tmp/TaskctlJobDic.txt','r')
+    fil=open(Tmp_Dir+'TaskctlJobDic.txt','r')
     output=fil.readlines()
     fil.close()
     #####解析etl_log.sh脚本抓取到的作业####
@@ -65,12 +69,12 @@ def InitJob():
 def Scan():
     global JobDic
     time.sleep(ScanInterval) #睡眠一分钟
-    (stats,output)= commands.getstatusoutput("find /opt/soft/taskctlserver/taskctl1/work/log/  -name '*.log' -type f -mmin -%s" % JobInterval) #找出两分钟内有更新的日志
-    fil=open('/BIG_DATA/EDW/ZYXF_EDW/PYTHON_APP/tmp/Taskctltemp.txt','w')
+    (stats,output)= commands.getstatusoutput("find $TASKCTLDIR/work/log/  -name '*.log' -type f -mmin -%s" % JobInterval) #找出两分钟内有更新的日志
+    fil=open(Tmp_Dir+'Taskctltemp.txt','w')
     output=output.decode('gbk').encode('utf-8')
     fil.write(output)
     fil.close()
-    fil=open('/BIG_DATA/EDW/ZYXF_EDW/PYTHON_APP/tmp/Taskctltemp.txt','r')
+    fil=open(Tmp_Dir+'Taskctltemp.txt','r')
     output=fil.readlines()
     fil.close()
     for FileName in output:
@@ -87,14 +91,14 @@ def Scan():
         FileName=FileName.replace('\n','')
         #####TASKCTL日志是GBK编码读进来后进行GBK解码再编码为UTF-8使用方便#####
         File=open(FileName.decode('utf-8').encode('gbk'),'r')
-        try:
-            contents=File.read().decode('gbk').encode('utf-8').splitlines()
-        except:
-            pass
-            #####出现了一个BUG日志文件会被移走，暂时抛出异常阻止程序退出，回头找个空文件试一试####
-            #print("异常抛出于88行:"+JobName)
+        contents=File.readlines()
         for cont in contents:
-            if '准备时间' in cont :
+            try:
+                cont=cont.decode('gbk').encode('utf-8')
+            except:
+                cont=cont
+            cont=cont.replace('\n','')
+            if '准备时间:' in cont :
                 BeginTime.append(cont)
             #开始时间不存在时，获取准备时间作为开始时间
             # elif '准备时间' in cont:
@@ -103,7 +107,7 @@ def Scan():
                 RuningRes.append(cont)
             elif '结束状态' in cont:
                 EndStats.append(cont)
-            elif '结束时间' in cont:
+            elif '结束时间:' in cont:
                 EndTime.append(cont)
             elif '程序名称' in cont:
                 ProgName=cont
@@ -138,8 +142,8 @@ def Scan():
                 RUN_STS=EndStats[len(EndStats)-1].split(':')[1].split('-')[0]
                 JOB_END_TIME=EndTime[len(EndTime)-1]
                 for i in range(len(contents))[::-1]:#取出最后一行不为空的值
-                    if contents[i]!='':
-                        ERR_LOG=contents[i]
+                    if contents[i].replace('\n','')!='':
+                        ERR_LOG=contents[i].replace('\n','').decode('gbk').encode('utf-8')
                         break
             New_Jobinfo=[JOB_FLOW_ID,JOB_FLOW_NAME,MOUDLE_NAME,JOB_NAME,BATCH_PRD,JOB_TYPE,PROG_NAME,PROG_PARA,JOB_START_TIME,JOB_END_TIME,RUN_STS,ERR_LOG]
             UpdateMysql(New_Jobinfo)
@@ -156,7 +160,7 @@ def Scan():
 def LinkMysql():
 # 打开数据库连接,一定要指定Mysql的链接方式是不是utf8的，否则提交的中文会变成乱码，编码方式一定要与环境统一
     conn= MySQLdb.connect(
-        host='192.168.3.41',
+        host=mysqldb,
         port = 3306,
         user='etl',
         passwd='etl',
@@ -221,7 +225,7 @@ def UpdateMysql(New_Jobinfo):
     JOB_END_TIME='$JOB_END_TIME$',
     RUN_STS='$RUN_STS$',
     ERR_LOG='$ERR_LOG$' 
-    where JOB_NAME='$JOB_NAME$' and MOUDLE_NAME='$MOUDLE_NAME$';
+    where JOB_NAME='$JOB_NAME$' and JOB_FLOW_ID='$JOB_FLOW_ID$' and BATCH_PRD='$BATCH_PRD$';
     '''       
     ###对单引号添加转义\  
     New_Jobinfo[7]=New_Jobinfo[7].replace("'","\\'")
@@ -238,7 +242,8 @@ def UpdateMysql(New_Jobinfo):
     UpdateSql=UpdateSql.replace('$RUN_STS$',New_Jobinfo[10])  
     UpdateSql=UpdateSql.replace('$ERR_LOG$',New_Jobinfo[11])
     UpdateSql=UpdateSql.replace('$JOB_NAME$',New_Jobinfo[3])
-    UpdateSql=UpdateSql.replace('$MOUDLE_NAME$',New_Jobinfo[2])
+    UpdateSql=UpdateSql.replace('$JOB_FLOW_ID$',New_Jobinfo[0])
+    UpdateSql=UpdateSql.replace('$BATCH_PRD$',BizData)
     print(UpdateSql)
     cur.execute(UpdateSql)
     conn.commit()
@@ -247,25 +252,37 @@ def ScanExit():
     global check_time
     global Flow
     global StartTime
+    global conn
     #由于要执行的命令是带中文的所以这里一定要把系统编码设置为GBK
     #nowTime=datetime.datetime.now().strftime("%m%d%H%M%S")
     if datetime.datetime.now()>=check_time:  
         for flow in Flow:
-            command="grep 'fdc_cycle' /opt/soft/taskctlserver/taskctl1/work/log/%s/ctlcore.log" % flow
+            command="grep 'fdc_cycle' $TASKCTLDIR/work/log/%s/ctlcore.log" % flow
             (stats,output)= commands.getstatusoutput(command)
             pattern = re.compile(r'\d+')
             res = re.findall(pattern, output) #res归档时间
             if res :
                 #归档时间大于监控开始时间该流程结束
-                guidangTIME=res[0]+res[1]
-                if int(guidangTIME)>int(StartTime):
-                    Flow[flow]='0'
+                #2018年9月7日发生数组访问越界，此处加上异常处理，再次运行查找错误原因
+                try:
+                    guidangTIME=res[0]+res[1]
+                    #print(guidangTIME)
+                    if int(guidangTIME)>int(StartTime):
+                        Flow[flow]='0'
+                except Exception as e:
+                    print(str(e),'res:',str(output))
         if '1' not in Flow.values():
             print("所有流程归档成功,监控程序正在刷新数据，请稍后。。。")
+            #退出之前将所有强制通过任务的结束状态置为14警告通过
             sql="update etl.ETL_RUN_BCH_JOB_LOG set RUN_STS='14' where RUN_STS='10'"
             cur.execute(sql)
             conn.commit()
             print("刷新数据完毕正在退出")
+            print("正在关闭数据库连接")
+            try:
+                conn.close()
+            except Exception as e:
+                print(e)
             time.sleep(2)
             sys.exit(0)
         else :
@@ -293,4 +310,4 @@ print("##################监控启动##########################")
 while 1:
     Scan()
     ScanExit()
-print("##################监控正在关闭######################")
+
